@@ -1,0 +1,25 @@
+{
+  "name": "deepgram-demo-agent",
+  "version": "1.0.0",
+  "description": "This is a STT LLM TTS agent in TypeScript using Deepgram and OpenAI Solutions",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@deepgram/sdk": "^3.9.0",
+    "@types/node": "^22.10.2",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "mic": "^2.1.2",
+    "openai": "^4.77.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
