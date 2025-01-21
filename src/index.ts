@@ -7,6 +7,7 @@ import OpenAI from "openai";
 import path from "path";
 import axios from "axios";
 import * as childProcess from "child_process";
+// @ts-ignore
 import Mic from "mic";
 // import { Deepgram } from "@deepgram/sdk";
 import { createClient } from "@deepgram/sdk";
@@ -99,7 +100,7 @@ class LanguageModelProcessor {
     this.openai = openai;
 
     // Load system prompt
-    const promptPath = path.resolve(__dirname, "../system_prompt.txt");
+    const promptPath = path.resolve(__dirname, "./systemPrompt.txt");
     this.systemPrompt = fs.readFileSync(promptPath, "utf8").trim();
 
     // Initialize memory with the system prompt at the start
