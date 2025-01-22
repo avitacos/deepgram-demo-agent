@@ -1,5 +1,5 @@
 // Project inspired by Greg Kamradt: https://www.youtube.com/@DataIndependent
-// Should I switch to node-record-lpcm16?: https://www.npmjs.com/package/node-record-lpcm16
+// Switch to node-record-lpcm16?: https://www.npmjs.com/package/node-record-lpcm16
 
 import "dotenv/config"; // Load .env
 import fs from "fs";
@@ -7,10 +7,15 @@ import OpenAI from "openai";
 import path from "path";
 import axios from "axios";
 import * as childProcess from "child_process";
+import {
+  createClient,
+  ListenLiveClient,
+  LiveTranscriptionEvents,
+} from "@deepgram/sdk";
 // @ts-ignore
 import Mic from "mic";
+// import * as  Mic from "mic";
 // import { Deepgram } from "@deepgram/sdk";
-import { createClient } from "@deepgram/sdk";
 // import { spawn } from "child_process";
 
 interface Message {
@@ -179,78 +184,160 @@ async function getTranscript(
 
     // Create a microphone instance
     const micInstance = Mic({
-      rate: "16000",
+      rate: "24000",
       channels: "1",
-      debug: false,
+      debug: true, // was false before!
     });
 
     const micInputStream = micInstance.getAudioStream();
 
+    // MicInputStream tests:
+    micInputStream.on("startComplete", () => {
+      console.log("Mic recording started");
+    });
+
+    micInputStream.on("stopComplete", () => {
+      console.log("Mic recording stopped");
+    });
+
+    micInputStream.on("pauseComplete", () => {
+      console.log("Mic recording paused");
+    });
+
+    // This event fires whenever data is read from the mic
+    // micInputStream.on("data", (chunk: Buffer) => {
+    //   console.log(`Mic data chunk of size: ${chunk.length}`);
+    // });
+
+    // If there’s an error
+    micInputStream.on("error", (err: Error) => {
+      console.error("Mic error:", err);
+    });
+    // End tests
+
     // Connect to Deepgram's real-time endpoint
-    const socket = deepgram.listen.live({
+    const connection: ListenLiveClient = deepgram.listen.live({
+      model: "nova-2",
       punctuate: true,
       language: "en-US",
       encoding: "linear16",
-      sample_rate: 16000,
+      sample_rate: 24000, // or 24000 if that’s what SoX is actually using
       endpointing: 300,
       smart_format: true,
     });
 
-    console.log("Listening...");
+    console.log("Connecting...");
 
-    socket.on("open", () => {
-      micInstance.start();
+    // Listen for open
+    connection.addListener(LiveTranscriptionEvents.Open, () => {
+      console.log("Deepgram connection open, starting mic...");
+      // micInstance.start() or relevant method
     });
 
-    socket.on("close", () => {
-      console.log("WebSocket closed");
+    // Listen for transcripts
+    connection.addListener(
+      LiveTranscriptionEvents.Transcript,
+      (dgData: any) => {
+        const { channel, is_final } = dgData;
+        if (!channel) return;
+
+        const { alternatives } = channel;
+        if (!alternatives || !alternatives[0]) return;
+
+        const transcript = alternatives[0].transcript;
+
+        if (!is_final) {
+          // Partial chunk
+          collector.addPart(transcript);
+        } else {
+          // Final chunk
+          collector.addPart(transcript);
+          const fullSentence = collector.getFullTranscript().trim();
+          if (fullSentence.length > 0) {
+            console.log(`Human: ${fullSentence}`);
+            callback(fullSentence);
+          }
+          collector.reset();
+
+          // If you only want one utterance per invocation:
+          // finish the connection so we can resolve the promise // .finished is depricated
+          connection.requestClose();
+        }
+      }
+    );
+
+    // Listen for close
+    connection.addListener(LiveTranscriptionEvents.Close, () => {
+      console.log("Deepgram connection closed.");
+      // Stop the mic if it's still running
       micInstance.stop();
+
+      // Resolve the Promise so your ConversationManager can proceed
       resolve();
     });
 
-    socket.on("transcriptReceived", (dgData) => {
-      const { channel } = dgData;
-      if (!channel) return;
-
-      const { alternatives } = channel;
-      if (!alternatives || !alternatives[0]) return;
-
-      const transcript = alternatives[0].transcript;
-      const isFinal = dgData.is_final;
-
-      if (!isFinal) {
-        // Intermediate chunk
-        collector.addPart(transcript);
-      } else {
-        // Final chunk
-        collector.addPart(transcript);
-        const fullSentence = collector.getFullTranscript().trim();
-        if (fullSentence.length > 0) {
-          console.log(`Human: ${fullSentence}`);
-          callback(fullSentence);
-        }
-        collector.reset();
-
-        // If you want to stop listening right after the first sentence:
-        // socket.close();
-      }
-    });
-
-    // If there's an error with the WebSocket
-    socket.on("error", (err: {}) => {
-      console.error("Socket error:", err);
+    // Listen for errors
+    connection.addListener(LiveTranscriptionEvents.Error, (error) => {
+      console.error("Deepgram error", error);
       micInstance.stop();
-      reject(err);
+      reject(error);
     });
 
-    micInputStream.on("data", (data: Buffer) => {
-      socket.send(data);
-    });
+    // socket.on("open", () => {
+    //   micInstance.start();
+    // });
 
-    micInputStream.on("error", (err: Error) => {
-      console.error("Mic error:", err);
-      reject(err);
-    });
+    // socket.on("close", () => {
+    //   console.log("WebSocket closed");
+    //   micInstance.stop();
+    //   resolve();
+    // });
+
+    //
+    // socket.on("transcriptReceived", (dgData) => {
+    //   const { channel } = dgData;
+    //   if (!channel) return;
+
+    //   const { alternatives } = channel;
+    //   if (!alternatives || !alternatives[0]) return;
+
+    //   const transcript = alternatives[0].transcript;
+    //   const isFinal = dgData.is_final;
+
+    //   if (!isFinal) {
+    //     // Intermediate chunk
+    //     collector.addPart(transcript);
+    //   } else {
+    //     // Final chunk
+    //     collector.addPart(transcript);
+    //     const fullSentence = collector.getFullTranscript().trim();
+    //     if (fullSentence.length > 0) {
+    //       console.log(`Human: ${fullSentence}`);
+    //       callback(fullSentence);
+    //     }
+    //     collector.reset();
+
+    //     // If you want to stop listening right after the first sentence:
+    //     // socket.finish()
+    //   }
+    // });
+
+    // If there's an error with the WebSocket - This is seemingly the old way and mostly depricated
+    // socket.on("error", (err: {}) => {
+    //   console.error("Socket error:", err);
+    //   micInstance.stop();
+    //   reject(err);
+    // });
+
+    // micInputStream.on("data", (data: Buffer) => {
+    //   socket.send(data);
+    //   console.log("Sending chunk to Deepgram, size:", data.length);
+    // });
+
+    // micInputStream.on("error", (err: Error) => {
+    //   console.error("Mic error:", err);
+    //   reject(err);
+    // });
   });
 }
 
