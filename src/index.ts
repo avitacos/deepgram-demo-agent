@@ -8,6 +8,7 @@ import {
   createClient,
   ListenLiveClient,
   LiveTranscriptionEvents,
+  DeepgramClientOptions,
 } from "@deepgram/sdk";
 // @ts-ignore
 import Mic from "mic"; // types/mic.d.ts isn't being found by ts
@@ -145,19 +146,15 @@ class LanguageModelProcessor {
 
 class TranscriptCollector {
   private transcriptParts: string[];
-
   constructor() {
     this.transcriptParts = [];
   }
-
   public reset(): void {
     this.transcriptParts = [];
   }
-
   public addPart(part: string): void {
     this.transcriptParts.push(part);
   }
-
   public getFullTranscript(): string {
     return this.transcriptParts.join(" ");
   }
@@ -211,9 +208,20 @@ async function getTranscript(
       language: "en-US",
       encoding: "linear16",
       sample_rate: 24000, // SoX seems to default at 24000
-      endpointing: 300,
+      endpointing: 60000,
       smart_format: true,
     });
+
+    let keepAlive;
+
+    if (keepAlive) {
+      clearInterval(keepAlive);
+    }
+
+    keepAlive = setInterval(() => {
+      console.log("deepgram: keepalive");
+      connection.keepAlive();
+    }, 10 * 1000);
 
     // Deepgram client listeners
     connection.addListener(LiveTranscriptionEvents.Open, () => {
@@ -251,6 +259,7 @@ async function getTranscript(
     connection.addListener(LiveTranscriptionEvents.Close, () => {
       console.log("Deepgram connection closed.");
       micInstance.stop();
+      clearInterval(keepAlive);
       // Resolve the Promise so ConversationManager can proceed
       resolve();
     });
@@ -292,9 +301,10 @@ class ConversationManager {
         break;
       }
 
-      // Only testing STT right now
       // Send the final transcript to LLM
-      // const llmResponse = await this.llm.process(this.transcriptionResponse);
+      const llmResponse = await this.llm.process(this.transcriptionResponse);
+
+      // console.log(llmResponse);
 
       // TTS
       // await this.tts.speak(llmResponse);
