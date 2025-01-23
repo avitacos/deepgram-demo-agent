@@ -1,7 +1,4 @@
-// Project inspired by Greg Kamradt: https://www.youtube.com/@DataIndependent
-// Switch to node-record-lpcm16?: https://www.npmjs.com/package/node-record-lpcm16
-
-import "dotenv/config"; // Load .env
+import "dotenv/config";
 import fs from "fs";
 import OpenAI from "openai";
 import path from "path";
@@ -13,10 +10,7 @@ import {
   LiveTranscriptionEvents,
 } from "@deepgram/sdk";
 // @ts-ignore
-import Mic from "mic";
-// import * as  Mic from "mic";
-// import { Deepgram } from "@deepgram/sdk";
-// import { spawn } from "child_process";
+import Mic from "mic"; // types/mic.d.ts isn't being found by ts
 
 interface Message {
   role: "system" | "user" | "assistant";
@@ -126,7 +120,7 @@ class LanguageModelProcessor {
 
     // Invoke ChatGPT
     const response = await this.openai.chat.completions.create({
-      model: "gpt-3.5-turbo", // Or 'gpt-4' if your API key has access
+      model: "gpt-3.5-turbo",
       messages: this.memory,
       temperature: 0,
     });
@@ -186,34 +180,29 @@ async function getTranscript(
     const micInstance = Mic({
       rate: "24000",
       channels: "1",
-      debug: true, // was false before!
+      debug: false, // This prints mic logs in real time to the terminal
     });
 
+    // Monitor mic input steam state in console
     const micInputStream = micInstance.getAudioStream();
-
-    // MicInputStream tests:
     micInputStream.on("startComplete", () => {
       console.log("Mic recording started");
     });
-
     micInputStream.on("stopComplete", () => {
       console.log("Mic recording stopped");
     });
-
     micInputStream.on("pauseComplete", () => {
       console.log("Mic recording paused");
     });
-
-    // This event fires whenever data is read from the mic
-    // micInputStream.on("data", (chunk: Buffer) => {
-    //   console.log(`Mic data chunk of size: ${chunk.length}`);
-    // });
-
-    // If there’s an error
     micInputStream.on("error", (err: Error) => {
       console.error("Mic error:", err);
     });
-    // End tests
+
+    // This event fires whenever data is read from the mic
+    micInputStream.on("data", (chunk: Buffer) => {
+      // console.log(`Mic data chunk of size: ${chunk.length}`);
+      connection.send(chunk);
+    });
 
     // Connect to Deepgram's real-time endpoint
     const connection: ListenLiveClient = deepgram.listen.live({
@@ -221,20 +210,17 @@ async function getTranscript(
       punctuate: true,
       language: "en-US",
       encoding: "linear16",
-      sample_rate: 24000, // or 24000 if that’s what SoX is actually using
+      sample_rate: 24000, // SoX seems to default at 24000
       endpointing: 300,
       smart_format: true,
     });
 
-    console.log("Connecting...");
-
-    // Listen for open
+    // Deepgram client listeners
     connection.addListener(LiveTranscriptionEvents.Open, () => {
       console.log("Deepgram connection open, starting mic...");
-      // micInstance.start() or relevant method
+      micInstance.start();
     });
-
-    // Listen for transcripts
+    // Listen for transcripts - Which is a result event from the ListenLiveClient connection
     connection.addListener(
       LiveTranscriptionEvents.Transcript,
       (dgData: any) => {
@@ -258,86 +244,22 @@ async function getTranscript(
             callback(fullSentence);
           }
           collector.reset();
-
-          // If you only want one utterance per invocation:
-          // finish the connection so we can resolve the promise // .finished is depricated
           connection.requestClose();
         }
       }
     );
-
-    // Listen for close
     connection.addListener(LiveTranscriptionEvents.Close, () => {
       console.log("Deepgram connection closed.");
-      // Stop the mic if it's still running
       micInstance.stop();
-
-      // Resolve the Promise so your ConversationManager can proceed
+      // Resolve the Promise so ConversationManager can proceed
       resolve();
     });
-
     // Listen for errors
     connection.addListener(LiveTranscriptionEvents.Error, (error) => {
       console.error("Deepgram error", error);
       micInstance.stop();
       reject(error);
     });
-
-    // socket.on("open", () => {
-    //   micInstance.start();
-    // });
-
-    // socket.on("close", () => {
-    //   console.log("WebSocket closed");
-    //   micInstance.stop();
-    //   resolve();
-    // });
-
-    //
-    // socket.on("transcriptReceived", (dgData) => {
-    //   const { channel } = dgData;
-    //   if (!channel) return;
-
-    //   const { alternatives } = channel;
-    //   if (!alternatives || !alternatives[0]) return;
-
-    //   const transcript = alternatives[0].transcript;
-    //   const isFinal = dgData.is_final;
-
-    //   if (!isFinal) {
-    //     // Intermediate chunk
-    //     collector.addPart(transcript);
-    //   } else {
-    //     // Final chunk
-    //     collector.addPart(transcript);
-    //     const fullSentence = collector.getFullTranscript().trim();
-    //     if (fullSentence.length > 0) {
-    //       console.log(`Human: ${fullSentence}`);
-    //       callback(fullSentence);
-    //     }
-    //     collector.reset();
-
-    //     // If you want to stop listening right after the first sentence:
-    //     // socket.finish()
-    //   }
-    // });
-
-    // If there's an error with the WebSocket - This is seemingly the old way and mostly depricated
-    // socket.on("error", (err: {}) => {
-    //   console.error("Socket error:", err);
-    //   micInstance.stop();
-    //   reject(err);
-    // });
-
-    // micInputStream.on("data", (data: Buffer) => {
-    //   socket.send(data);
-    //   console.log("Sending chunk to Deepgram, size:", data.length);
-    // });
-
-    // micInputStream.on("error", (err: Error) => {
-    //   console.error("Mic error:", err);
-    //   reject(err);
-    // });
   });
 }
 
@@ -363,14 +285,19 @@ class ConversationManager {
 
       // Check for "goodbye"
       if (this.transcriptionResponse.toLowerCase().includes("goodbye")) {
+        console.log(
+          "Final state of transcript",
+          this.collector.getFullTranscript()
+        );
         break;
       }
 
+      // Only testing STT right now
       // Send the final transcript to LLM
-      const llmResponse = await this.llm.process(this.transcriptionResponse);
+      // const llmResponse = await this.llm.process(this.transcriptionResponse);
 
       // TTS
-      await this.tts.speak(llmResponse);
+      // await this.tts.speak(llmResponse);
 
       // Reset transcription response
       this.transcriptionResponse = "";
