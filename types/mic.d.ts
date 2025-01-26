@@ -7,6 +7,8 @@ declare module "mic" {
     fileType?: string;
     exitOnSilence?: number;
     // etc. from mic docs if needed
+    thresholdStart: number; // dB or raw amplitude level
+    thresholdStop: number;
   }
 
   interface MicInstance {

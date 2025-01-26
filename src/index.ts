@@ -110,7 +110,12 @@ class LanguageModelProcessor {
     });
   }
 
-  public async process(text: string): Promise<string> {
+  public async process(text: string): Promise<string | undefined> {
+    if (text.length < 1) {
+      // No message to send so return
+      return Promise.resolve(undefined);
+    }
+
     // Add user message to the memory
     this.memory.push({
       role: "user",
@@ -173,34 +178,6 @@ async function getTranscript(
   return new Promise<void>((resolve, reject) => {
     const deepgram = createClient(deepgramApiKey);
 
-    // Create a microphone instance
-    const micInstance = Mic({
-      rate: "24000",
-      channels: "1",
-      debug: false, // This prints mic logs in real time to the terminal
-    });
-
-    // Monitor mic input steam state in console
-    const micInputStream = micInstance.getAudioStream();
-    micInputStream.on("startComplete", () => {
-      console.log("Mic recording started");
-    });
-    micInputStream.on("stopComplete", () => {
-      console.log("Mic recording stopped");
-    });
-    micInputStream.on("pauseComplete", () => {
-      console.log("Mic recording paused");
-    });
-    micInputStream.on("error", (err: Error) => {
-      console.error("Mic error:", err);
-    });
-
-    // This event fires whenever data is read from the mic
-    micInputStream.on("data", (chunk: Buffer) => {
-      // console.log(`Mic data chunk of size: ${chunk.length}`);
-      connection.send(chunk);
-    });
-
     // Connect to Deepgram's real-time endpoint
     const connection: ListenLiveClient = deepgram.listen.live({
       model: "nova-2",
@@ -208,26 +185,47 @@ async function getTranscript(
       language: "en-US",
       encoding: "linear16",
       sample_rate: 24000, // SoX seems to default at 24000
-      endpointing: 60000,
+      endpointing: 300,
       smart_format: true,
+      vad: false,
     });
 
-    let keepAlive;
+    // Create a microphone instance
+    const micInstance = Mic({
+      rate: "24000",
+      channels: "1",
+      debug: false, // This prints mic logs in real time to the terminal
+      thresholdStart: 0.5, // dB or raw amplitude level
+      thresholdStop: 0.5,
+    });
 
-    if (keepAlive) {
-      clearInterval(keepAlive);
-    }
+    // Monitor mic input steam state in console
+    const micInputStream = micInstance.getAudioStream();
+    // micInputStream.on("startComplete", () => {
+    //   console.log("Mic recording started");
+    // });
+    // micInputStream.on("stopComplete", () => {
+    //   console.log("Mic recording stopped");
+    // });
+    // micInputStream.on("pauseComplete", () => {
+    //   console.log("Mic recording paused");
+    // });
+    // micInputStream.on("error", (err: Error) => {
+    //   console.error("Mic error:", err);
+    // });
 
-    keepAlive = setInterval(() => {
-      console.log("deepgram: keepalive");
-      connection.keepAlive();
-    }, 10 * 1000);
+    // This event fires whenever data is read from the mic
+    micInputStream.on("data", (chunk: Buffer) => {
+      // console.log(`Mic data chunk of size: ${chunk.length}`);
+      connection.send(chunk);
+    });
 
     // Deepgram client listeners
     connection.addListener(LiveTranscriptionEvents.Open, () => {
       console.log("Deepgram connection open, starting mic...");
       micInstance.start();
     });
+
     // Listen for transcripts - Which is a result event from the ListenLiveClient connection
     connection.addListener(
       LiveTranscriptionEvents.Transcript,
@@ -240,11 +238,15 @@ async function getTranscript(
 
         const transcript = alternatives[0].transcript;
 
+        console.log("is final: ", is_final);
+        console.log("transcript: ", transcript);
+
         if (!is_final) {
           // Partial chunk
           collector.addPart(transcript);
         } else {
           // Final chunk
+
           collector.addPart(transcript);
           const fullSentence = collector.getFullTranscript().trim();
           if (fullSentence.length > 0) {
@@ -259,7 +261,7 @@ async function getTranscript(
     connection.addListener(LiveTranscriptionEvents.Close, () => {
       console.log("Deepgram connection closed.");
       micInstance.stop();
-      clearInterval(keepAlive);
+
       // Resolve the Promise so ConversationManager can proceed
       resolve();
     });
@@ -303,8 +305,6 @@ class ConversationManager {
 
       // Send the final transcript to LLM
       const llmResponse = await this.llm.process(this.transcriptionResponse);
-
-      // console.log(llmResponse);
 
       // TTS
       // await this.tts.speak(llmResponse);

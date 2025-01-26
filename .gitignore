@@ -1,2 +1,8 @@
 node_modules
 .env
+.gitignore
+
+commonFunctions.ts
+mockAgent.ts
+simpleSpeechOrchestrator.ts
+mockAgentWS.ts
