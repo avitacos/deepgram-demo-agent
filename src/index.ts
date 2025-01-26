@@ -8,10 +8,11 @@ import {
   createClient,
   ListenLiveClient,
   LiveTranscriptionEvents,
-  DeepgramClientOptions,
 } from "@deepgram/sdk";
+
+// TODO: create a types/record-lpcm16.d.ts type file since it doesn't exist
 // @ts-ignore
-import Mic from "mic"; // types/mic.d.ts isn't being found by ts
+import recorder from "node-record-lpcm16";
 
 interface Message {
   role: "system" | "user" | "assistant";
@@ -20,7 +21,7 @@ interface Message {
 
 export class TextToSpeech {
   private readonly DG_API_KEY = process.env.DEEPGRAM_API_KEY;
-  private readonly MODEL_NAME = "aura-helios-en"; // update if needed
+  private readonly MODEL_NAME = "aura-helios-en";
 
   private isFfplayInstalled(): boolean {
     try {
@@ -31,12 +32,12 @@ export class TextToSpeech {
     }
   }
 
-  public async speak(text: string): Promise<void> {
+  public async speak(text: string | undefined): Promise<void> {
+    if (!text) return;
     if (!this.isFfplayInstalled()) {
       throw new Error("ffplay not found, necessary to stream audio.");
     }
-
-    const DEEPGRAM_URL = `https://api.deepgram.com/v1/speak?model=${this.MODEL_NAME}&performance=some&encoding=linear16&sample_rate=24000`;
+    const DEEPGRAM_URL = `https://api.deepgram.com/v1/speak?model=${this.MODEL_NAME}&encoding=linear16&sample_rate=24000`;
 
     const headers = {
       Authorization: `Token ${this.DG_API_KEY}`,
@@ -45,8 +46,17 @@ export class TextToSpeech {
 
     const payload = { text };
 
+    // Hiding common ffplay warnings for clear console
+    const ffplayArgs = [
+      '-hide_banner',       // hide the banner
+      '-loglevel', 'quiet', // suppress warnings and errors
+      '-i', 'pipe:0',       // read from stdin
+      '-autoexit',          // close when done
+      '-nodisp'             // don’t show any window
+    ];
+
     // Start a child process to run ffplay and feed it the audio from TTS.
-    const ffplay = childProcess.spawn("ffplay", ["-autoexit", "-", "-nodisp"], {
+    const ffplay = childProcess.spawn("ffplay", ffplayArgs, {
       stdio: ["pipe", "inherit", "inherit"],
     });
 
@@ -99,11 +109,9 @@ class LanguageModelProcessor {
     });
     this.openai = openai;
 
-    // Load system prompt
     const promptPath = path.resolve(__dirname, "./systemPrompt.txt");
     this.systemPrompt = fs.readFileSync(promptPath, "utf8").trim();
 
-    // Initialize memory with the system prompt at the start
     this.memory.push({
       role: "system",
       content: this.systemPrompt,
@@ -112,11 +120,9 @@ class LanguageModelProcessor {
 
   public async process(text: string): Promise<string | undefined> {
     if (text.length < 1) {
-      // No message to send so return
       return Promise.resolve(undefined);
     }
 
-    // Add user message to the memory
     this.memory.push({
       role: "user",
       content: text,
@@ -124,7 +130,6 @@ class LanguageModelProcessor {
 
     const startTime = Date.now();
 
-    // Invoke ChatGPT
     const response = await this.openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: this.memory,
@@ -139,7 +144,6 @@ class LanguageModelProcessor {
 
     console.log(`LLM (${elapsed}ms): ${assistantMessage}`);
 
-    // Add AI message to the memory
     this.memory.push({
       role: "assistant",
       content: assistantMessage,
@@ -167,115 +171,11 @@ class TranscriptCollector {
 
 const deepgramApiKey = process.env.DEEPGRAM_API_KEY || "";
 
-interface GetTranscriptCallback {
-  (transcript: string): void;
-}
-
-async function getTranscript(
-  callback: GetTranscriptCallback,
-  collector: TranscriptCollector
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const deepgram = createClient(deepgramApiKey);
-
-    // Connect to Deepgram's real-time endpoint
-    const connection: ListenLiveClient = deepgram.listen.live({
-      model: "nova-2",
-      punctuate: true,
-      language: "en-US",
-      encoding: "linear16",
-      sample_rate: 24000, // SoX seems to default at 24000
-      endpointing: 300,
-      smart_format: true,
-      vad: false,
-    });
-
-    // Create a microphone instance
-    const micInstance = Mic({
-      rate: "24000",
-      channels: "1",
-      debug: false, // This prints mic logs in real time to the terminal
-      thresholdStart: 0.5, // dB or raw amplitude level
-      thresholdStop: 0.5,
-    });
-
-    // Monitor mic input steam state in console
-    const micInputStream = micInstance.getAudioStream();
-    // micInputStream.on("startComplete", () => {
-    //   console.log("Mic recording started");
-    // });
-    // micInputStream.on("stopComplete", () => {
-    //   console.log("Mic recording stopped");
-    // });
-    // micInputStream.on("pauseComplete", () => {
-    //   console.log("Mic recording paused");
-    // });
-    // micInputStream.on("error", (err: Error) => {
-    //   console.error("Mic error:", err);
-    // });
-
-    // This event fires whenever data is read from the mic
-    micInputStream.on("data", (chunk: Buffer) => {
-      // console.log(`Mic data chunk of size: ${chunk.length}`);
-      connection.send(chunk);
-    });
-
-    // Deepgram client listeners
-    connection.addListener(LiveTranscriptionEvents.Open, () => {
-      console.log("Deepgram connection open, starting mic...");
-      micInstance.start();
-    });
-
-    // Listen for transcripts - Which is a result event from the ListenLiveClient connection
-    connection.addListener(
-      LiveTranscriptionEvents.Transcript,
-      (dgData: any) => {
-        const { channel, is_final } = dgData;
-        if (!channel) return;
-
-        const { alternatives } = channel;
-        if (!alternatives || !alternatives[0]) return;
-
-        const transcript = alternatives[0].transcript;
-
-        console.log("is final: ", is_final);
-        console.log("transcript: ", transcript);
-
-        if (!is_final) {
-          // Partial chunk
-          collector.addPart(transcript);
-        } else {
-          // Final chunk
-
-          collector.addPart(transcript);
-          const fullSentence = collector.getFullTranscript().trim();
-          if (fullSentence.length > 0) {
-            console.log(`Human: ${fullSentence}`);
-            callback(fullSentence);
-          }
-          collector.reset();
-          connection.requestClose();
-        }
-      }
-    );
-    connection.addListener(LiveTranscriptionEvents.Close, () => {
-      console.log("Deepgram connection closed.");
-      micInstance.stop();
-
-      // Resolve the Promise so ConversationManager can proceed
-      resolve();
-    });
-    // Listen for errors
-    connection.addListener(LiveTranscriptionEvents.Error, (error) => {
-      console.error("Deepgram error", error);
-      micInstance.stop();
-      reject(error);
-    });
-  });
-}
-
 class ConversationManager {
-  private transcriptionResponse = "";
+  private deepgramConnection: ListenLiveClient | null = null;
+  private recording: ReturnType<typeof recorder.record> | null = null;
+
+  // private transcriptionResponse = "";
   private llm: LanguageModelProcessor;
   private tts: TextToSpeech;
   private collector: TranscriptCollector;
@@ -286,39 +186,126 @@ class ConversationManager {
     this.collector = new TranscriptCollector();
   }
 
-  public async main(): Promise<void> {
-    const handleFullSentence = (fullSentence: string) => {
-      this.transcriptionResponse = fullSentence;
-    };
+  public async start(): Promise<void> {
+    console.log("Starting conversation manager...");
+    const deepgram = createClient(deepgramApiKey);
 
-    while (true) {
-      await getTranscript(handleFullSentence, this.collector);
+    this.deepgramConnection = deepgram.listen.live({
+      model: "nova-2",
+      punctuate: true,
+      language: "en-US",
+      encoding: "linear16",
+      sample_rate: 16000, 
+      endpointing: 300,   
+      smart_format: true,
+      vad: false,        
+    });
 
-      // Check for "goodbye"
-      if (this.transcriptionResponse.toLowerCase().includes("goodbye")) {
-        console.log(
-          "Final state of transcript",
-          this.collector.getFullTranscript()
-        );
-        break;
+    this.deepgramConnection.addListener(LiveTranscriptionEvents.Open, () => {
+      console.log("Deepgram connection opened.");
+    });
+
+    this.deepgramConnection.addListener(LiveTranscriptionEvents.Transcript, (dgData: any) => {
+      const { channel, is_final } = dgData;
+      if (!channel) return;
+
+      const alternatives = channel.alternatives;
+      if (!alternatives || !alternatives[0]) return;
+
+      const transcript = alternatives[0].transcript;
+      if (!is_final) {
+        this.collector.addPart(transcript);
+      } else {
+        // final
+        this.collector.addPart(transcript);
+        const fullSentence = this.collector.getFullTranscript().trim();
+        this.collector.reset();
+
+        if (fullSentence) {
+          console.log("Human:", fullSentence);
+          this.handleUserTranscript(fullSentence);
+        }
       }
+    });
 
-      // Send the final transcript to LLM
-      const llmResponse = await this.llm.process(this.transcriptionResponse);
+    this.deepgramConnection.addListener(LiveTranscriptionEvents.Close, () => {
+      console.log("Deepgram connection closed.");
+      this.stopMicrophone();
+    });
 
-      // TTS
-      // await this.tts.speak(llmResponse);
+    this.deepgramConnection.addListener(LiveTranscriptionEvents.Error, (error) => {
+      console.error("Deepgram error:", error);
+      this.stopMicrophone();
+    });
 
-      // Reset transcription response
-      this.transcriptionResponse = "";
+    this.startMicrophone();
+
+    // Keep sessions to only 30 seconds
+    const TIMEOUT_MS = 30_000; // 30 seconds
+    setTimeout(() => {
+      console.log("Conversation time limit reached, stopping conversation...");
+      this.stop();
+    }, TIMEOUT_MS);
+  }
+
+  private async handleUserTranscript(fullSentence: string): Promise<void> {
+    // TODO: Handle when user says goodbye in a sentence but didn't mean to end the conversation
+    if (fullSentence.toLowerCase().includes("goodbye")) {
+      console.log("User said goodbye. Stopping conversation...");
+      this.stop();
+      return;
+    }
+
+    const llmResponse = await this.llm.process(fullSentence);
+
+    await this.tts.speak(llmResponse);
+  }
+
+  private startMicrophone(): void {
+    console.log("Starting microphone recording...");
+
+    this.recording = recorder.record({
+      sampleRate: 16000, // Must match the connection.sample_rate
+      // threshold: 0.5, // Add threshold if audio is picking up non word sounds
+    });
+
+    const micStream = this.recording.stream();
+
+    micStream.on("data", (chunk: Buffer) => {
+      if (this.deepgramConnection) {
+        this.deepgramConnection.send(chunk);
+      }
+    });
+
+    micStream.on("error", (err: Error) => {
+      console.error("Microphone error:", err);
+    });
+  }
+
+  private stopMicrophone(): void {
+    if (this.recording) {
+      console.log("Stopping microphone recording...");
+      this.recording.stop();
+      this.recording = null;
+    }
+  }
+
+  public stop(): void {
+    console.log("Stopping conversation manager...");
+
+    if (this.deepgramConnection) {
+      // This triggers the 'Close' event, which also calls stopMicrophone()
+      this.deepgramConnection.requestClose();
+      this.deepgramConnection = null;
+    } else {
+      this.stopMicrophone();
     }
   }
 }
 
 async function runApp() {
   const manager = new ConversationManager();
-  await manager.main();
-  console.log("Conversation ended. Goodbye!");
+  await manager.start();
 }
 
 if (require.main === module) {
